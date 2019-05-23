@@ -1,5 +1,6 @@
 #include <dso_ros/dso_node.h>
 #include <dso_ros/ros_output_wrapper.h>
+#include <numeric>
 
 
 int main(int argc, char **argv)
