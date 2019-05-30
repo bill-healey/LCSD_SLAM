@@ -1,6 +1,7 @@
 ## CUSTOM
 DSO_ROS/catkin_ws/.catkin_workspace
 DSO_ROS/catkin_ws/devel
+DSO_ROS/catkin_ws/src/CMakeLists.txt
 
 ##### Windows
 # Windows thumbnail cache files
