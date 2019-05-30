@@ -3,16 +3,16 @@
     <node pkg="dso_ros" type="dso_node" name="dso_ros" output="screen">
         <!--remap from="image" to="/image_raw"/-->
         <param name="debug" type="bool" value="false"/>
-        <param name="display_GUI" type="bool" value="false"/>
+        <param name="display_GUI" type="bool" value="true"/>
         <param name="playback_speed" type="double" value="1"/>
         <param name="mode" type="int" value="1"/>
         <param name="dataset" type="int" value="2"/>
 
-        <param name="image_file_path" type="string" value="/media/seonghunlee/wdMyBook/TUM_monoVO/sequence_01/images.zip"/>
-        <param name="calib_file_path" type="string" value="/media/seonghunlee/wdMyBook/TUM_monoVO/sequence_01/camera.txt"/>
-        <param name="vignette_file_path" type="string" value="/media/seonghunlee/wdMyBook/TUM_monoVO/sequence_01/vignette.png"/>
-        <param name="gamma_file_path" type="string" value="/media/seonghunlee/wdMyBook/TUM_monoVO/sequence_01/pcalib.txt"/>
-        <param name="stats_file_path" type="string" value="/home/seonghunlee/ros/dso_ros_private/catkin_ws/src/dso_ros_private/trackingStats.txt"/>
+        <param name="image_file_path" type="string" value="/home/bill/git/datasets/TUM/sequence_01/images.zip"/>
+        <param name="calib_file_path" type="string" value="/home/bill/git/datasets/TUM/sequence_01/camera.txt"/>
+        <param name="vignette_file_path" type="string" value="/home/bill/git/datasets/TUM/sequence_01/vignette.png"/>
+        <param name="gamma_file_path" type="string" value="/home/bill/git/datasets/TUM/sequence_01/pcalib.txt"/>
+        <param name="stats_file_path" type="string" value="trackingStats.txt"/>
         
         <param name="dso_frame_id" type="string" value="dso_odom"/>
         <param name="odom_frame_id" type="string" value="odom"/>
