@@ -387,7 +387,7 @@ ImageAndExposure* Undistort::undistort(const MinimalImage<T>* image_raw, float e
 {
 	if(image_raw->w != wOrg || image_raw->h != hOrg)
 	{
-		printf("Undistort::undistort: wrong image size (%d %d instead of %d %d) \n", image_raw->w, image_raw->h, w, h);
+		printf("Undistort::undistort: wrong image size (%d %d instead of %d %d) \n", image_raw->w, image_raw->h, wOrg, hOrg);
 		exit(1);
 	}
 

@@ -178,18 +178,17 @@ void dso_ros::DsoNode::RunDSOLive() {
     Undistort* undistorter = Undistort::getUndistorterForFile(calib_file, gamma_file, vignette_file);
 
     bool open = cap.open(0);
-    cap.set(4,720);
-    cap.set(5,576);
+    //cap.set(4,720);
+    //cap.set(5,576);
 
     bool frame_captured = cap.read(frame);
     namedWindow("Display window", cv::WINDOW_AUTOSIZE);
     imshow("Display window", frame);
-    cv::waitKey(0);
 
-    printf("Frame info: type: %i chan: %i\n",frame.type(), frame.channels());
+    printf("Frame info: type: %i chan: %i width: %i height: %i\n",frame.type(), frame.channels(), frame.cols, frame.rows);
+    //TODO: Need to convert to bw?
     MinimalImageB minImg((int)frame.cols, (int)frame.rows,(unsigned char*)frame.data);
     ImageAndExposure* undistImg = undistorter->undistort<unsigned char>(&minImg, 1,0, 1.0f);
-    //undistImg->timestamp=undistImg->header.stamp.toSec(); // relay the timestamp to dso
 
     image_h = undistImg->h;
     image_w = undistImg->w;
@@ -201,7 +200,6 @@ void dso_ros::DsoNode::RunDSOLive() {
     {
         fullSystem->setGammaFunction(undistorter->photometricUndist->getG());
     }
-    fullSystem->linearizeOperation = (playbackSpeed==0);
 
     if (display_GUI)
     {
@@ -211,76 +209,82 @@ void dso_ros::DsoNode::RunDSOLive() {
             fullSystem->outputWrapper.push_back(new dso::IOWrap::PangolinDSOViewer(image_w,image_h));
     }
 
+    dso::setting_photometricCalibration = 0;
+    fullSystem->linearizeOperation = 0;
+
     fullSystem->outputWrapper.push_back(new dso_ros::ROSOutputWrapper(nh, nh_private));
 
     printf("LOADING COMPLETE!\n");
 
-    struct timeval tv_start;
-    gettimeofday(&tv_start, NULL);
-    clock_t started = clock();
-
-    nSkippedFrames = 0;
-    nTotalFramesAfterInit = 0;
-    trackingStartTimestamp = 0;
-    trackingEndTimestamp = 0;
     int curFrameId = 0;
-
-    double resetAllowedTimeFactor = 0.3;
+    double initTimestamp = 0;
+    int nTotalFramesAfterInit=0;
+    double frame_timestamp = 0.0;
+    double track_start_timestamp = 0.0;
+    double track_end_timestamp = 0.0;
 
     while(true) {
         frame_captured = cap.read(frame);
+        cvtColor(frame, frame, CV_RGB2GRAY);
+        frame_timestamp = ros::Time::now().toSec();
         MinimalImageB minFrame((int)frame.cols, (int)frame.rows,(unsigned char*)frame.data);
-        ImageAndExposure* undistFrame = undistorter->undistort<unsigned char>(&minFrame, 1,0, 1.0f);
 
-        if (display_GUI_for_my_system)
-        {
+        //Undistort is basically just a copy when photometriccalibration=0
+        dso::setting_photometricCalibration = 0;
+        std::shared_ptr<dso::ImageAndExposure> frame_orig(undistorter->undistort<unsigned char>(&minFrame, 1, frame_timestamp, 1.0f));
+
+        //Perform actual undistort if needed here
+        dso::setting_photometricCalibration = original_setting_photometricCalibration;
+        std::shared_ptr<dso::ImageAndExposure> frame_undist(undistorter->undistort<unsigned char>(&minFrame, 1, frame_timestamp, 1.0f));
+        
+        if (display_GUI_for_my_system) {
             sensor_msgs::ImageConstPtr rectified_live_image_msg;
-            rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(undistFrame, false);
+            rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(frame_undist, false);
             rectified_live_image_pub.publish(rectified_live_image_msg);
         }
 
-        if(!fullSystem->initialized)    // if not initialized: reset start time.
-        {
+        if(!fullSystem->initialized) {   // if not initialized: reset start time.
             printf("Waiting for system init..\n");
             usleep(1000);
-            gettimeofday(&tv_start, NULL);
-            started = clock();
-
+            initTimestamp = ros::Time::now().toSec();
         }
 
-        if (fullSystem->initFailed || dso::setting_fullResetRequested)
+        if (fullSystem->initFailed || dso::setting_fullResetRequested) {
+            printf("Resetting\n");
             reset();
+        }
 
-        bool skipFrame=false;
-
-        if (fullSystem->initialized)
+        if (fullSystem->initialized) {
             nTotalFramesAfterInit++;
+        }
 
-        struct timeval tv_beforeTracking, tv_afterTracking;
 
-        // Send images without photo calib to ORB-SLAM
-        dso::setting_photometricCalibration = 0;
-        std::shared_ptr<dso::ImageAndExposure> img_noPhotoCalib(minFrame);
-        dso::setting_photometricCalibration = original_setting_photometricCalibration;
-        gettimeofday(&tv_beforeTracking, NULL);
+        {
+            // Send images without calibration to ORB_SLAM2
+            std::unique_lock<std::mutex> lock(frame_sync_mtx);
+            frame_ptrs_sync.push_back(frame_orig);
+            frame_timestamps_sync.push_back(frame_timestamp);
+            frame_IDs_sync.push_back(curFrameId);
+            curFrameId++;
+        }
+
 
         // Use images with photo calib in DSO
-        fullSystem->addActiveFrame(undistFrame, curFrameId, half_resolution);
-        gettimeofday(&tv_afterTracking, NULL);
+        track_start_timestamp = ros::Time::now().toSec();
+        fullSystem->addActiveFrame(frame_undist.get(), curFrameId, half_resolution);
+        track_end_timestamp = ros::Time::now().toSec();
 
-        double trackingSecond = (tv_afterTracking.tv_sec-tv_beforeTracking.tv_sec) + (tv_afterTracking.tv_usec-tv_beforeTracking.tv_usec)/(1000.0f*1000.0f);
-        double trackingMillisecond = trackingSecond*1000;
-        trackingTimes.push_back(trackingMillisecond);
+        trackingTimes.push_back(track_end_timestamp - track_start_timestamp);
 
         if(fullSystem->isLost)
         {
             //dso::setting_fullResetRequested = true;
             printf("TRACKING LOST!!\n");
-            break;
+            //break;
         }
         else if (fullSystem->initialized)
         {
-            
+            printf("System Initialized\n"); 
         }
 
     }
@@ -334,406 +338,9 @@ void dso_ros::DsoNode::RunDSOLive() {
 
 
 void dso_ros::DsoNode::RunDSO() {
-    /*********************************************************/
-    /*   Step 1: Initialize ImageFolderReader, FullSystem,   */
-    /*           and outpur wrapper                          */
-    /*********************************************************/
-
-    if (mode == 0) {
-        this->RunDSOLive();
-        exit(1);
-        return;
-    }
-
-    reader = new ImageFolderReader(image_file,calib_file, gamma_file, vignette_file);
-    reader->setGlobalCalibration(half_resolution);
-
-    std::shared_ptr<dso::ImageAndExposure> img_temp(reader->getImage(0));
-    image_h = img_temp.get()->h;
-    image_w = img_temp.get()->w;
-    image_h_half = image_h/2;
-    image_w_half = image_w/2;
-
-    fullSystem = new FullSystem();
-    fullSystem->setGammaFunction(reader->getPhotometricGamma());
-    fullSystem->linearizeOperation = (playbackSpeed==0);
-
-    if (display_GUI)
-    {
-        if (half_resolution)
-            fullSystem->outputWrapper.push_back(new dso::IOWrap::PangolinDSOViewer(image_w_half,image_h_half));
-        else
-            fullSystem->outputWrapper.push_back(new dso::IOWrap::PangolinDSOViewer(image_w,image_h));
-    }
-
-    if (mode==1)
-        fullSystem->outputWrapper.push_back(new dso_ros::ROSOutputWrapper(nh, nh_private));
-
-    /***************************************/
-    /*   Step 2: Get IDs and timestamps    */
-    /***************************************/
-
-    std::vector<int> idsToPlay;
-    std::vector<double> timesToPlayAt;
-
-    int lstart=0;
-    int lend=100000;
-    int linc = 1;
-
-    for(int i=lstart;i>= 0 && i< reader->getNumImages() && linc*i < linc*lend;i+=linc)
-    {
-       idsToPlay.push_back(i);
-       if(timesToPlayAt.size() == 0)
-       {
-           timesToPlayAt.push_back((double)0);
-       }
-       else
-       {
-           double tsThis = reader->getTimestamp(idsToPlay[idsToPlay.size()-1]);
-           double tsPrev = reader->getTimestamp(idsToPlay[idsToPlay.size()-2]);
-           timesToPlayAt.push_back(timesToPlayAt.back() +  fabs(tsThis-tsPrev)/playbackSpeed);
-       }
-    }
-
-    double sleep_init = (timesToPlayAt.at(1)-timesToPlayAt.at(0))*1e6;
-
-    /*******************************/
-    /*   Step 3: Preload images    */
-    /*******************************/
-
-    std::vector<std::shared_ptr<dso::ImageAndExposure> > preloadedImages;
-    std::vector<std::shared_ptr<dso::ImageAndExposure> > preloadedImages_noPhotoCalib;
-    std::vector<std::shared_ptr<dso::MinimalImageB> > preloadedRawImages;
-
-    if (preRectification || mode==2 || mode==3)
-    {
-        if (dataset==2 && mode==1)
-            printf("LOADING AND RECTIFYING (AND PHOTOMETRICALLY CALIBRATING IF APPLICABLE) ALL IMAGES!\n");
-        else
-            printf("LOADING AND RECTIFYING ALL IMAGES (NO PHOTOMETRIC CALIBRATION)!\n");
-
-        for(int ii=0;ii<(int)idsToPlay.size(); ii++)
-        {
-           int i = idsToPlay[ii];
-           std::shared_ptr<dso::ImageAndExposure> img(reader->getImage(i));
-           preloadedImages.emplace_back(img);
-        }
-
-        // In our system, we use images wihtout photo calibration for ORB-SLAM
-        if (dataset==2 && mode == 1 )
-        {
-            dso::setting_photometricCalibration = 0;
-
-            for(int ii=0;ii<(int)idsToPlay.size(); ii++)
-            {
-               int i = idsToPlay[ii];
-               std::shared_ptr<dso::ImageAndExposure> img(reader->getImage(i));
-               preloadedImages_noPhotoCalib.emplace_back(img);
-            }
-
-            dso::setting_photometricCalibration = original_setting_photometricCalibration;
-
-        }
-
-        printf("LOADING COMPLETE!\n");
-    }
-    else // (!preRectification && mode == 1)
-    {
-        printf("LOADIDNG ALL RAW IMAGES (NO GEOMETRIC OR PHOTOMETRIC CALIB)!\n");
-        for(int ii=0;ii<(int)idsToPlay.size(); ii++)
-        {
-            int i = idsToPlay[ii];
-            std::shared_ptr<dso::MinimalImageB> img(reader->getImageRaw(i));
-            preloadedRawImages.push_back(img);
-        }
-        printf("LOADING COMPLETE!\n");
-    }
-
-    /***********************************************/
-    /*   Step 4: Generate rectified images         */
-    /*           (ONLY IF this mode is selected)   */
-    /***********************************************/
-
-    if (mode==2 || mode==3)
-    {
-        for(int ii=0;ii<(int)idsToPlay.size(); ii++)
-        {
-            // Publish the rectified image:
-            sensor_msgs::ImageConstPtr rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(preloadedImages[ii], half_resolution);
-            rectified_live_image_pub.publish(rectified_live_image_msg);
-            std::cout << "Publish " << ii << std::endl;
-            usleep(10000);
-
-            std::string image_filename(rectified_file);
-
-            std::ostringstream s1;
-            s1 << std::setw(2) << std::setfill('0') << sequence;
-            image_filename+=s1.str();
-
-            image_filename+="/images_rectifiedFullResolution/";
-
-            std::ostringstream s2;
-            s2 << std::setw(4) << std::setfill('0') << ii;
-            image_filename+=s2.str();
-
-            image_filename+=".jpg";
-
-            std::ifstream f1(image_filename.c_str());
-
-            bool frame_missed = false;
-            if( !f1.good() )
-            {
-                std::cout << "Frame not saved. Wait..." << std::endl;
-                frame_missed = true;
-                usleep(1000000);
-            }
-
-            if (frame_missed)
-            {
-                std::ifstream f2(image_filename.c_str());
-                if (!f2.good())
-                {
-                    std::cout << "Frame missed. Repeat!" << std::endl;
-                    ii--;
-                }
-                else
-                    std::cout << "Saved it after waiting a bit! ;)" << std::endl;
-
-            }
-        }
-
-        preloadedImages.clear();
-        delete reader;
-
-        exit(1);
-        return;
-    }
-
-    /*******************************/
-    /*   Step 5: Run our system!   */
-    /*******************************/
-
-    struct timeval tv_start;
-    gettimeofday(&tv_start, NULL);
-    clock_t started = clock();
-    double sInitializerOffset=0;
-
-    nSkippedFrames = 0;
-    nTotalFramesAfterInit = 0;
-    trackingStartTimestamp = 0;
-    trackingEndTimestamp = 0;
-    startTimestamp = reader->getTimestamp(idsToPlay.front());
-    endTimestamp = reader->getTimestamp(idsToPlay.back());
-
-    double resetAllowedTimeFactor = 0.3;
-    double timestampThreshold = timesToPlayAt.at((int) timesToPlayAt.size()*resetAllowedTimeFactor);
-
-
-    while (!idsToPlay.empty())
-    {
-        if (display_GUI_for_my_system)
-        {
-            sensor_msgs::ImageConstPtr rectified_live_image_msg;
-            if (preRectification)
-                rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(preloadedImages_noPhotoCalib.front(), false);
-            else
-            {
-                std::shared_ptr<dso::ImageAndExposure> img_noPhotoCalib(reader->getImageFromImageRaw(preloadedRawImages.front().get(), idsToPlay.front()));
-                rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(img_noPhotoCalib, false);
-            }
-            rectified_live_image_pub.publish(rectified_live_image_msg);
-        }
-
-        if(!fullSystem->initialized)    // if not initialized: reset start time.
-        {
-            usleep((int)(sleep_init));
-            gettimeofday(&tv_start, NULL);
-            started = clock();
-            sInitializerOffset = timesToPlayAt[idsToPlay.front()];
-
-        }
-
-        if (fullSystem->initFailed || dso::setting_fullResetRequested)
-            reset();
-
-        bool skipFrame=false;
-
-        struct timeval tv_now; gettimeofday(&tv_now, NULL);
-        double sSinceStart = sInitializerOffset + ((tv_now.tv_sec-tv_start.tv_sec) + (tv_now.tv_usec-tv_start.tv_usec)/(1000.0f*1000.0f));
-
-
-        if (fullSystem->initialized)
-        {
-            if(sSinceStart < timesToPlayAt[idsToPlay.front()])
-            {
-                usleep((int)((timesToPlayAt[idsToPlay.front()]-sSinceStart)*1000*1000));
-            }
-            else if(sSinceStart > timesToPlayAt[idsToPlay.front()]/*+0.5+0.1*(ii%2)*/)
-            {
-                skipFrame=true;
-                nSkippedFrames++;
-
-                //printf("SKIPFRAME %d (play at %f, now it is %f)!\n", ii, timesToPlayAt[ii], sSinceStart);
-                double overdue_ms = (sSinceStart-timesToPlayAt[idsToPlay.front()])*1000;
-                std::cout << std::setprecision(15) << "SKIP FRAME (#"<< nSkippedFrames <<")! "<< overdue_ms << "ms overdue "<< std::endl;
-
-            }
-        }
-
-        if(!skipFrame)
-        {
-            if (fullSystem->initialized)
-                nTotalFramesAfterInit++;
-
-            struct timeval tv_beforeTracking, tv_afterTracking;
-
-            if (preRectification)
-            {
-
-                {
-                    std::unique_lock<std::mutex> lock(frame_sync_mtx);
-                    // Send images without photo calib to ORB-SLAM
-                    if (dataset==1)
-                        frame_ptrs_sync.push_back(preloadedImages.front());
-                    else if (dataset==2)
-                        frame_ptrs_sync.push_back(preloadedImages_noPhotoCalib.front());
-
-                    frame_timestamps_sync.push_back(reader->getTimestamp(idsToPlay.front()));
-                    frame_IDs_sync.push_back(idsToPlay.front());
-                }
-
-                gettimeofday(&tv_beforeTracking, NULL);
-                // Use images with photo calib in DSO
-                fullSystem->addActiveFrame(preloadedImages.front().get(), idsToPlay.front(), half_resolution);
-                gettimeofday(&tv_afterTracking, NULL);
-            }
-            else
-            {
-                // Send images without photo calib to ORB-SLAM
-                dso::setting_photometricCalibration = 0;
-                std::shared_ptr<dso::ImageAndExposure> img_noPhotoCalib(reader->getImageFromImageRaw(preloadedRawImages.front().get(), idsToPlay.front()));
-                dso::setting_photometricCalibration = original_setting_photometricCalibration;
-
-                {
-                    std::unique_lock<std::mutex> lock(frame_sync_mtx);
-                    frame_ptrs_sync.push_back(img_noPhotoCalib);
-                    frame_timestamps_sync.push_back(reader->getTimestamp(idsToPlay.front()));
-                    frame_IDs_sync.push_back(idsToPlay.front());
-                }
-
-                gettimeofday(&tv_beforeTracking, NULL);
-                // Use images with photo calib in DSO
-                std::shared_ptr<dso::ImageAndExposure> img(reader->getImageFromImageRaw(preloadedRawImages.front().get(), idsToPlay.front()));
-                fullSystem->addActiveFrame(img.get(), idsToPlay.front(), half_resolution);
-                gettimeofday(&tv_afterTracking, NULL);
-            }
-
-            double trackingSecond = (tv_afterTracking.tv_sec-tv_beforeTracking.tv_sec) + (tv_afterTracking.tv_usec-tv_beforeTracking.tv_usec)/(1000.0f*1000.0f);
-            double trackingMillisecond = trackingSecond*1000;
-            trackingTimes.push_back(trackingMillisecond);
-        }
-
-        if(fullSystem->isLost)
-        {
-            if (sSinceStart < timestampThreshold)
-            {
-                std::cout << "Lost within first 30%. Reset!" << std::endl;
-                dso::setting_fullResetRequested = true;
-            }
-            else
-            {
-                printf("LOST!!\n");
-                break;
-            }
-        }
-        else if (fullSystem->initialized)
-        {
-            trackingEndTimestamp = reader->getTimestamp(idsToPlay.front());
-            if (trackingStartTimestamp == 0)
-                trackingStartTimestamp = reader->getTimestamp(idsToPlay.front());
-        }
-
-        // Don't forget to erase!
-        if (preRectification)
-        {
-            preloadedImages.erase(preloadedImages.begin());
-            preloadedImages_noPhotoCalib.erase(preloadedImages_noPhotoCalib.begin());
-        }
-        else
-            preloadedRawImages.erase(preloadedRawImages.begin());
-
-        idsToPlay.erase(idsToPlay.begin());
-    }
-
-    printf("TRACKING FINISHED!! \n");
-    fullSystem->blockUntilMappingIsFinished();
-
-    printf("Marginalize Everything By Force!! \n");
-    for (int i = 0; i < 10; i++)
-    {
-        usleep(0.1*1000*1000);
-        fullSystem->marginalizeEverythingByForce();
-    }
-
-    for(IOWrap::Output3DWrapper* ow : fullSystem->outputWrapper)
-        ow->publishFullStop();
-
-    preloadedImages.clear();
-    preloadedImages_noPhotoCalib.clear();
-    preloadedRawImages.clear();
-
-    /***************************************/
-    /*   Step 6: Print timing statistics   */
-    /***************************************/
-
-    double trackingTimeMed, trackingTimeAvg, trackingTimeStd;
-    if (trackingTimes.empty())
-    {
-        trackingTimeMed = 0;
-        trackingTimeAvg = 0;
-        trackingTimeStd = 0;
-    }
-    else
-    {
-        sort(trackingTimes.begin(), trackingTimes.end());
-        trackingTimeMed = trackingTimes[trackingTimes.size()/2];
-        trackingTimeAvg = accumulate(trackingTimes.begin(), trackingTimes.end(), 0.0)/trackingTimes.size();
-        std::vector<double> diff(trackingTimes.size());
-        std::transform(trackingTimes.begin(), trackingTimes.end(), diff.begin(), std::bind2nd(std::minus<double>(), trackingTimeAvg));
-        trackingTimeStd = std::inner_product(diff.begin(), diff.end(), diff.begin(), 0.0)/trackingTimes.size();
-        trackingTimeStd = std::sqrt(trackingTimeStd);
-    }
-
-    // Print result
-    printf("PRINT RESULTS start!! \n");
-    fullSystem->printResultSeong(
-            stats_file,
-            nSkippedFrames,
-            nTotalFramesAfterInit,
-            trackingTimeMed,
-            trackingTimeAvg,
-            trackingTimeStd,
-            trackingStartTimestamp,
-            trackingEndTimestamp,
-            startTimestamp,
-            endTimestamp);
-    printf("PRINT RESULTS end!! \n");
-
-
-    while (ros::ok())
-    {
-        ros::Duration(1).sleep();
-    }
-
-
-    for (dso::IOWrap::Output3DWrapper *ow : fullSystem->outputWrapper) {
-      ow->join();
-      delete ow;
-    }
-
-    delete fullSystem;
-    delete reader;
-
+    this->RunDSOLive();
+    exit(1);
+    return;
 }
 
 void dso_ros::DsoNode::PublishMarginalizedStuffFromDSO(const float &publish_loop_rate)
