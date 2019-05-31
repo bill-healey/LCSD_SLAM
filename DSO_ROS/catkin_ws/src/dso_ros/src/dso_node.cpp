@@ -1,6 +1,9 @@
 #include <dso_ros/dso_node.h>
 #include <dso_ros/ros_output_wrapper.h>
 #include <numeric>
+#include <opencv2/opencv.hpp>
+#include <opencv2/videoio.hpp>
+#include "util/Undistort.h"
 
 
 int main(int argc, char **argv)
@@ -35,22 +38,18 @@ dso_ros::DsoNode::DsoNode(ros::NodeHandle &n, ros::NodeHandle &n_private)
   , stats_file("")
   , initial_timestamp(0)
   , display_GUI_for_my_system(false)
-  //, full_system(new dso::FullSystem())
-  //, undistorter()
 {
     initParams();
 
-//    if (dataset == 1) //1=EuRoC MAV using rosbag, 2=TUM monoVO
-//        image_sub = n.subscribe<sensor_msgs::Image>("image_raw", 10, boost::bind(&dso_ros::DsoNode::imageCb, this, _1));
-
     /*****************************************************/
     /*   Setting the mode:                               */
+    /*   0 = Live                                        */
     /*   1 = Run Our System                              */
     /*   2 = Generate rectified Full Resolution Images   */
     /*   3 = Generate rectified Half Resolution Images   */
     /*****************************************************/
 
-    if (mode == 1)
+    if (mode == 0 || mode == 1)
     {
         KF_ID_calib_pose_points_sub = n.subscribe(
               "KF_ID_calib_pose_points", 10, &dso_ros::DsoNode::KF_ID_calib_pose_points_callback, this);
@@ -90,100 +89,11 @@ dso_ros::DsoNode::DsoNode(ros::NodeHandle &n, ros::NodeHandle &n_private)
 
     original_setting_photometricCalibration = dso::setting_photometricCalibration;
 
-
-    //reset();
 }
 
 dso_ros::DsoNode::~DsoNode()
 {
 }
-
-/*
-void dso_ros::DsoNode::imageCb(const sensor_msgs::ImageConstPtr &img)
-{
-    // this is needed to avoid initial freeze of whole algorithm. I don't know why
-    // it needs couple initial frames to make reset function.
-    if (frame_ID == 3) {
-    reset();
-    }
-    cv_bridge::CvImagePtr cv_ptr =
-      cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
-    assert(cv_ptr->image.type() == CV_8U);
-    assert(cv_ptr->image.channels() == 1);
-
-    if (dso::setting_fullResetRequested) {
-    ROS_ERROR_STREAM("[DSO_ROS]: System reset requested from DSO");
-    reset();
-    } else if (full_system->initFailed) {
-    ROS_ERROR_STREAM("[DSO_ROS]: DSO init failed");
-    reset();
-    }
-
-    dso::MinimalImageB min_img((int)cv_ptr->image.cols, (int)cv_ptr->image.rows,
-                             (unsigned char *)cv_ptr->image.data);
-
-    double timestamp_double = cv_ptr->header.stamp.toSec();
-
-    if (mode == 1) // My system
-    {
-        // Geometric Undistortion
-        dso::setting_photometricCalibration = 0;
-        std::shared_ptr<dso::ImageAndExposure> geo_undist_img(undistorter->undistort<unsigned char>(&min_img, 1, timestamp_double, 1.0f));
-        // Add to system
-        full_system->addActiveFrame(geo_undist_img.get(), frame_ID, half_resolution_dso);
-
-        // Get the image height and width:
-        image_h = geo_undist_img->h;
-        image_w = geo_undist_img->w;
-        image_h_half = geo_undist_img->h_half;
-        image_w_half = geo_undist_img->w_half;
-
-
-//        // Print result
-//        full_system->printResult("/home/seonghunlee/ros/dso_ros_private/catkin_ws/src/dso_ros_private/KeyFrameTrajectory_DSO.txt");
-
-        {
-            std::unique_lock<std::mutex> lock(frame_sync_mtx);
-            frame_ptrs_sync.push_back(geo_undist_img);
-            frame_timestamps_sync.push_back(timestamp_double);
-            frame_IDs_sync.push_back(frame_ID);
-            frame_ID++;
-        }
-    }
-    else if (mode == 2 || mode == 3) // original DSO
-    {
-        // Geometric (& Photometric) Undistortion
-        std::shared_ptr<dso::ImageAndExposure> full_undist_img(undistorter->undistort<unsigned char>(&min_img, 1, timestamp_double, 1.0f));
-
-        // Add to system
-        full_system->addActiveFrame(full_undist_img.get(), frame_ID, half_resolution_dso);
-
-        // Get the image height and width:
-        image_h = full_undist_img->h;
-        image_w = full_undist_img->w;
-        image_h_half = full_undist_img->h_half;
-        image_w_half = full_undist_img->w_half;
-
-
-        // Print result
-        if (half_resolution_dso)
-            full_system->printResult("/home/seonghunlee/ros/dso_ros_private/catkin_ws/src/dso_ros_private/KeyFrameTrajectory_DSO_half.txt");
-        else
-            full_system->printResult("/home/seonghunlee/ros/dso_ros_private/catkin_ws/src/dso_ros_private/KeyFrameTrajectory_DSO_full.txt");
-    }
-    else // original ORB
-    {
-        // Geometric Undistortion
-       dso::setting_photometricCalibration = 0;
-       std::shared_ptr<dso::ImageAndExposure> geo_undist_img(undistorter->undistort<unsigned char>(&min_img, 1, timestamp_double, 1.0f));
-
-       // Publish the rectified image:
-       sensor_msgs::ImageConstPtr rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(geo_undist_img, half_resolution_orb);
-       rectified_live_image_pub.publish(rectified_live_image_msg);
-
-    }
-}
-*/
 
 void dso_ros::DsoNode::Display_GUI_callback(const std_msgs::Empty &msg)
 {
@@ -260,12 +170,180 @@ void dso_ros::DsoNode::KF_ID_calib_pose_points_callback(const std_msgs::Float32M
 }
 
 
-void dso_ros::DsoNode::RunDSO()
-{
+void dso_ros::DsoNode::RunDSOLive() {
+    cv::Mat frame;
+    cv::Mat pose;
+    cv::VideoCapture cap;
+
+    Undistort* undistorter = Undistort::getUndistorterForFile(calib_file, gamma_file, vignette_file);
+
+    bool open = cap.open(0);
+    cap.set(4,720);
+    cap.set(5,576);
+
+    bool frame_captured = cap.read(frame);
+    namedWindow("Display window", cv::WINDOW_AUTOSIZE);
+    imshow("Display window", frame);
+    cv::waitKey(0);
+
+    printf("Frame info: type: %i chan: %i\n",frame.type(), frame.channels());
+    MinimalImageB minImg((int)frame.cols, (int)frame.rows,(unsigned char*)frame.data);
+    ImageAndExposure* undistImg = undistorter->undistort<unsigned char>(&minImg, 1,0, 1.0f);
+    //undistImg->timestamp=undistImg->header.stamp.toSec(); // relay the timestamp to dso
+
+    image_h = undistImg->h;
+    image_w = undistImg->w;
+    image_h_half = image_h/2;
+    image_w_half = image_w/2;
+
+    fullSystem = new FullSystem();
+    if(undistorter->photometricUndist != 0)
+    {
+        fullSystem->setGammaFunction(undistorter->photometricUndist->getG());
+    }
+    fullSystem->linearizeOperation = (playbackSpeed==0);
+
+    if (display_GUI)
+    {
+        if (half_resolution)
+            fullSystem->outputWrapper.push_back(new dso::IOWrap::PangolinDSOViewer(image_w_half,image_h_half));
+        else
+            fullSystem->outputWrapper.push_back(new dso::IOWrap::PangolinDSOViewer(image_w,image_h));
+    }
+
+    fullSystem->outputWrapper.push_back(new dso_ros::ROSOutputWrapper(nh, nh_private));
+
+    printf("LOADING COMPLETE!\n");
+
+    struct timeval tv_start;
+    gettimeofday(&tv_start, NULL);
+    clock_t started = clock();
+
+    nSkippedFrames = 0;
+    nTotalFramesAfterInit = 0;
+    trackingStartTimestamp = 0;
+    trackingEndTimestamp = 0;
+    int curFrameId = 0;
+
+    double resetAllowedTimeFactor = 0.3;
+
+    while(true) {
+        frame_captured = cap.read(frame);
+        MinimalImageB minFrame((int)frame.cols, (int)frame.rows,(unsigned char*)frame.data);
+        ImageAndExposure* undistFrame = undistorter->undistort<unsigned char>(&minFrame, 1,0, 1.0f);
+
+        if (display_GUI_for_my_system)
+        {
+            sensor_msgs::ImageConstPtr rectified_live_image_msg;
+            rectified_live_image_msg = ConvertImageAndExposure2ImagePtr(undistFrame, false);
+            rectified_live_image_pub.publish(rectified_live_image_msg);
+        }
+
+        if(!fullSystem->initialized)    // if not initialized: reset start time.
+        {
+            printf("Waiting for system init..\n");
+            usleep(1000);
+            gettimeofday(&tv_start, NULL);
+            started = clock();
+
+        }
+
+        if (fullSystem->initFailed || dso::setting_fullResetRequested)
+            reset();
+
+        bool skipFrame=false;
+
+        if (fullSystem->initialized)
+            nTotalFramesAfterInit++;
+
+        struct timeval tv_beforeTracking, tv_afterTracking;
+
+        // Send images without photo calib to ORB-SLAM
+        dso::setting_photometricCalibration = 0;
+        std::shared_ptr<dso::ImageAndExposure> img_noPhotoCalib(minFrame);
+        dso::setting_photometricCalibration = original_setting_photometricCalibration;
+        gettimeofday(&tv_beforeTracking, NULL);
+
+        // Use images with photo calib in DSO
+        fullSystem->addActiveFrame(undistFrame, curFrameId, half_resolution);
+        gettimeofday(&tv_afterTracking, NULL);
+
+        double trackingSecond = (tv_afterTracking.tv_sec-tv_beforeTracking.tv_sec) + (tv_afterTracking.tv_usec-tv_beforeTracking.tv_usec)/(1000.0f*1000.0f);
+        double trackingMillisecond = trackingSecond*1000;
+        trackingTimes.push_back(trackingMillisecond);
+
+        if(fullSystem->isLost)
+        {
+            //dso::setting_fullResetRequested = true;
+            printf("TRACKING LOST!!\n");
+            break;
+        }
+        else if (fullSystem->initialized)
+        {
+            
+        }
+
+    }
+
+    printf("TRACKING FINISHED!! \n");
+    fullSystem->blockUntilMappingIsFinished();
+
+    printf("Marginalize Everything By Force!! \n");
+    for (int i = 0; i < 10; i++)
+    {
+        usleep(0.1*1000*1000);
+        fullSystem->marginalizeEverythingByForce();
+    }
+
+    for(IOWrap::Output3DWrapper* ow : fullSystem->outputWrapper)
+        ow->publishFullStop();
+
+    ///  Step 6: Print timing statistics 
+
+    double trackingTimeMed, trackingTimeAvg, trackingTimeStd;
+    if (trackingTimes.empty())
+    {
+        trackingTimeMed = 0;
+        trackingTimeAvg = 0;
+        trackingTimeStd = 0;
+    }
+    else
+    {
+        sort(trackingTimes.begin(), trackingTimes.end());
+        trackingTimeMed = trackingTimes[trackingTimes.size()/2];
+        trackingTimeAvg = accumulate(trackingTimes.begin(), trackingTimes.end(), 0.0)/trackingTimes.size();
+        std::vector<double> diff(trackingTimes.size());
+        std::transform(trackingTimes.begin(), trackingTimes.end(), diff.begin(), std::bind2nd(std::minus<double>(), trackingTimeAvg));
+        trackingTimeStd = std::inner_product(diff.begin(), diff.end(), diff.begin(), 0.0)/trackingTimes.size();
+        trackingTimeStd = std::sqrt(trackingTimeStd);
+    }
+
+    while (ros::ok())
+    {
+        ros::Duration(1).sleep();
+    }
+
+
+    for (dso::IOWrap::Output3DWrapper *ow : fullSystem->outputWrapper) {
+      ow->join();
+      delete ow;
+    }
+
+    delete fullSystem;
+}
+
+
+void dso_ros::DsoNode::RunDSO() {
     /*********************************************************/
     /*   Step 1: Initialize ImageFolderReader, FullSystem,   */
     /*           and outpur wrapper                          */
     /*********************************************************/
+
+    if (mode == 0) {
+        this->RunDSOLive();
+        exit(1);
+        return;
+    }
 
     reader = new ImageFolderReader(image_file,calib_file, gamma_file, vignette_file);
     reader->setGlobalCalibration(half_resolution);

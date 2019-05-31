@@ -57,6 +57,7 @@ public:
   void Display_GUI_callback(const std_msgs::Empty &msg);
   void PublishMarginalizedStuffFromDSO(const float &publish_loop_rate);
   void RunDSO();
+  void RunDSOLive();
 
   sensor_msgs::ImageConstPtr ConvertImageAndExposure2ImagePtr(std::shared_ptr<dso::ImageAndExposure> input, bool half_resolution);
 
