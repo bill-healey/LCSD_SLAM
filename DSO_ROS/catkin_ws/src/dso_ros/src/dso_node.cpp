@@ -177,11 +177,12 @@ void dso_ros::DsoNode::RunDSOLive() {
 
     Undistort* undistorter = Undistort::getUndistorterForFile(calib_file, gamma_file, vignette_file);
 
-    bool open = cap.open(0);
+    bool succeeded = cap.open(0);
+    
     //cap.set(4,720);
     //cap.set(5,576);
 
-    bool frame_captured = cap.read(frame);
+    succeeded = cap.read(frame);
     namedWindow("Display window", cv::WINDOW_AUTOSIZE);
     imshow("Display window", frame);
 
@@ -224,7 +225,7 @@ void dso_ros::DsoNode::RunDSOLive() {
     double track_end_timestamp = 0.0;
 
     while(true) {
-        frame_captured = cap.read(frame);
+        succeeded = cap.read(frame);
         cvtColor(frame, frame, CV_RGB2GRAY);
         frame_timestamp = ros::Time::now().toSec();
         MinimalImageB minFrame((int)frame.cols, (int)frame.rows,(unsigned char*)frame.data);
@@ -243,14 +244,16 @@ void dso_ros::DsoNode::RunDSOLive() {
             rectified_live_image_pub.publish(rectified_live_image_msg);
         }
 
+        //TODO: remove sleeps
         if(!fullSystem->initialized) {   // if not initialized: reset start time.
             printf("Waiting for system init..\n");
-            usleep(1000);
+            usleep(100000);
             initTimestamp = ros::Time::now().toSec();
         }
 
         if (fullSystem->initFailed || dso::setting_fullResetRequested) {
             printf("Resetting\n");
+            sleep(1);
             reset();
         }
 
@@ -640,7 +643,12 @@ void dso_ros::DsoNode::reset()
     for(IOWrap::Output3DWrapper* ow : wraps) ow->reset();
 
     fullSystem = new FullSystem();
-    fullSystem->setGammaFunction(reader->getPhotometricGamma());
+    /*
+    if(undistorter->photometricUndist != 0)
+    {
+        fullSystem->setGammaFunction(undistorter->photometricUndist->getG());
+    }
+    */
     fullSystem->linearizeOperation = (playbackSpeed==0);
 
     fullSystem->outputWrapper = wraps;
